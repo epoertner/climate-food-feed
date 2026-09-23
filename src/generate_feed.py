@@ -241,7 +241,12 @@ def rss_item(x):
 
 def write_feed(slug, title, items):
     FEED_DIR.mkdir(exist_ok=True)
-    channel_link = f"https://example.invalid/{slug}"
+    pages_base_url = os.environ.get(
+    "PAGES_BASE_URL",
+    "https://example.invalid"
+).rstrip("/")
+
+channel_link = f"{pages_base_url}/feeds/{slug}.xml"
     body = "\n".join(rss_item(x) for x in items)
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
