@@ -12,6 +12,3 @@ jobs:
   generate_feed:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        GITHUB_REPOSITORY: ${{ github.repository }}
