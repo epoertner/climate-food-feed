@@ -1,5 +1,5 @@
 on:
   schedule:
-    - cron: '0 7 * * 1'
+    - cron: '0 7 * * 5'
       timezone: 'Europe/Zurich'
   workflow_dispatch:
