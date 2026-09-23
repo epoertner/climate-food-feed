@@ -1,0 +1,60 @@
+# Seed sources. Discovery is deliberately broader than this list.
+# type: science, media, ngo, institution
+
+science:
+  - name: Nature Climate Change
+    url: https://www.nature.com/nclimate.rss
+  - name: Nature Food
+    url: https://www.nature.com/natfood.rss
+  - name: Nature Sustainability
+    url: https://www.nature.com/natsustaimetab.rss
+  - name: Environmental Research Letters
+    url: https://iopscience.iop.org/journal/1748-9326
+  - name: Global Environmental Change
+    url: https://www.sciencedirect.com/journal/global-environmental-change
+  - name: Antipode
+    url: https://onlinelibrary.wiley.com/journal/14678330
+  - name: Political Geography
+    url: https://www.sciencedirect.com/journal/political-geography
+  - name: Environment and Planning A
+    url: https://journals.sagepub.com/home/epn
+  - name: Environment and Planning E
+    url: https://journals.sagepub.com/home/ene
+  - name: Geoforum
+    url: https://www.sciencedirect.com/journal/geoforum
+  - name: Journal of Peasant Studies
+    url: https://www.tandfonline.com/journals/fjps20
+  - name: Journal of Agrarian Change
+    url: https://onlinelibrary.wiley.com/journal/14710366
+  - name: Agriculture and Human Values
+    url: https://link.springer.com/journal/10460
+  - name: Food Policy
+    url: https://www.sciencedirect.com/journal/food-policy
+  - name: Sociologia Ruralis
+    url: https://onlinelibrary.wiley.com/journal/14679523
+  - name: Third World Quarterly
+    url: https://www.tandfonline.com/journals/ctwq20
+
+media:
+  - name: Carbon Brief
+    url: https://www.carbonbrief.org/feed/
+  - name: Mongabay
+    url: https://news.mongabay.com/feed/
+  - name: Le Monde Planète
+    url: https://www.lemonde.fr/planete/rss_full.xml
+  - name: The Guardian Environment
+    url: https://www.theguardian.com/environment/rss
+
+ngo:
+  - name: FAO
+    url: https://www.fao.org/feeds/
+  - name: IPBES
+    url: https://www.ipbes.net/rss.xml
+  - name: UNEP
+    url: https://www.unep.org/rss.xml
+
+switzerland:
+  - name: Agroscope
+    url: https://www.agroscope.admin.ch/agroscope/en/home/news.rss.xml
+  - name: WSL
+    url: https://www.wsl.ch/en/news/rss.xml
