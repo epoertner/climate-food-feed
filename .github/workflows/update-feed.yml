@@ -3,3 +3,13 @@ on:
     - cron: '0 7 * * 5'
       timezone: 'Europe/Zurich'
   workflow_dispatch:
+
+jobs:
+  example-job:
+    runs-on: python
+    defaults:
+      run:
+        working-directory: ./src
+    steps:
+      - name: Run a script
+        run: ./generate_feed.py
