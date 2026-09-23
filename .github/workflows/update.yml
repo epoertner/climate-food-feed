@@ -1,0 +1,5 @@
+on:
+  schedule:
+    - cron: '0 7 * * 1'
+      timezone: 'Europe/Zurich'
+  workflow_dispatch:
