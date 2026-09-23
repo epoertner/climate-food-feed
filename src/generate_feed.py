@@ -246,10 +246,12 @@ def write_feed(slug, title, items):
     "https://example.invalid"
 ).rstrip("/")
 
-channel_link = f"{pages_base_url}/feeds/{slug}.xml"
+channel_link = f"{pages_base_url}/feeds/{slug}.xml"<link>{channel_link}</link>
+<atom:link href="{channel_link}" rel="self" type="application/rss+xml"/>
     body = "\n".join(rss_item(x) for x in items)
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
+<rss version="2.0"
+     xmlns:atom="http://www.w3.org/2005/Atom">
 <channel>
 <title>{escape(title)} — Climate & Food Critical Feed</title>
 <link>{channel_link}</link>
