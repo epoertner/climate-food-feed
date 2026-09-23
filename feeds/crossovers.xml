@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0"><channel>
-<title>Crossovers / Wild Cards — Climate &amp; Food Critical Feed</title>
-<link>https://example.invalid/</link>
-<description>Placeholder; run the GitHub Action to populate this feed.</description>
-</channel></rss>
+<rss version="2.0">
+<channel>
+<title>Crossovers / Wild Cards — Climate & Food Critical Feed</title>
+<link>https://example.invalid/crossovers</link>
+<description>Weekly curated research and analysis in English, German and French.</description>
+<language>en</language>
+<lastBuildDate>Wed, 23 Sep 2026 11:45:00 +0000</lastBuildDate>
+
+</channel>
+</rss>
