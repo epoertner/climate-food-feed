@@ -1,11 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
-<channel>
-<title>Switzerland — Climate & Food Critical Feed</title>
-<link>https://example.invalid/switzerland</link>
-<description>Weekly curated research and analysis in English, German and French.</description>
-<language>en</language>
-<lastBuildDate>Wed, 23 Sep 2026 11:45:00 +0000</lastBuildDate>
-
-</channel>
+<rss version="2.0"
+     xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Switzerland — Climate / Ecology / Agriculture / Food</title>
+    <link>https://USERNAME.github.io/REPOSITORY/feeds/switzerland.xml</link>
+    <atom:link
+      href="https://USERNAME.github.io/REPOSITORY/feeds/switzerland.xml"
+      rel="self"
+      type="application/rss+xml"/>
+    <description>
+      Curated research, investigations, reports and analysis relevant to climate, ecology, agriculture and food systems in Switzerland.
+    </description>
+    <language>en</language>
+  </channel>
 </rss>
