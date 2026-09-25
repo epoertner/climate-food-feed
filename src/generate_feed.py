@@ -1,311 +1,382 @@
 #!/usr/bin/env python3
-"""
-Generate four curated RSS feeds.
-
-The heavy lifting is done by an OpenAI Responses API call with web search.
-The model is instructed to research broadly, then return structured JSON.
-This script validates the JSON, removes duplicates, preserves an archive,
-and writes RSS 2.0 feeds suitable for NetNewsWire.
-"""
-
-from __future__ import annotations
-import datetime as dt
 import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
+from email.utils import format_datetime
+from html import escape
 from pathlib import Path
-from xml.sax.saxutils import escape
-import requests
+from urllib.parse import urlparse
+
 import yaml
+from openai import OpenAI
 
 ROOT = Path(__file__).resolve().parents[1]
-FEED_DIR = ROOT / "feeds"
+FEEDS_DIR = ROOT / "feeds"
 DATA_DIR = ROOT / "data"
-ARCHIVE = DATA_DIR / "archive.json"
-SOURCES = ROOT / "src" / "sources.yml"
+ARCHIVE_FILE = DATA_DIR / "archive.json"
+SOURCES_FILE = ROOT / "src" / "sources.yml"
 
-FEEDS = {
-    "climate": "Climate & Ecology",
-    "agriculture": "Agriculture & Food Systems",
-    "switzerland": "Switzerland",
-    "crossovers": "Crossovers / Wild Cards",
-}
+MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.6")
+EXPECTED_TOTAL = 60
 
-TODAY = dt.date.today().isoformat()
 
-SYSTEM = """You are the editorial curator for a multilingual weekly RSS feed.
-Your job is to find genuinely substantive publications, not simply the most visible
-ones.
+def fail(message):
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(1)
 
-Editorial priorities:
-1. Surprise / counter-intuitive evidence.
-2. Important critical analysis or a meaningful challenge to an established assumption.
-3. New empirical evidence, systematic review, scholarly synthesis, or strong original
-   reporting.
-4. Unexpected connections between climate/ecology, agriculture/food, political economy,
-   land, labour, property, colonial history, finance, infrastructure, migration,
-   biodiversity, health or geopolitics.
-5. Small or specialist outlets can outrank major outlets; never select because an outlet
-   is famous.
-6. Approximately half or more of the complete selection must be scholarly/scientific.
-   Scientific includes natural sciences AND critical social science, human geography,
-   political ecology, agrarian studies, sociology, anthropology, history and related
-   scholarly fields.
-7. Explicitly search beyond Nature/Science. Important targets include Antipode,
-   Political Geography, Environment and Planning A-E, Geoforum, Global Environmental
-   Change, Journal of Peasant Studies, Journal of Agrarian Change, Agriculture and
-   Human Values, Food Policy, Sociologia Ruralis, Third World Quarterly and adjacent
-   journals.
-8. Languages: English, German, French.
-9. Roughly one third of the complete selection should have a substantive Switzerland
-   connection. Do NOT pad this quota with weak items.
-10. Do not treat "critical" as synonymous with anti-government, anti-capitalist,
-    activist or progressive. Empirical work that challenges a popular environmental
-    claim in either direction can qualify.
-11. Avoid routine daily news, press releases, generic explainers and shallow opinion.
-12. Older publications may be selected when newly relevant; explain why.
-13. Verify URLs and publication metadata using web search.
-"""
 
-def load_archive():
-    if not ARCHIVE.exists():
-        return []
-    try:
-        return json.loads(ARCHIVE.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+def load_sources():
+    with SOURCES_FILE.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
-def save_archive(items):
-    DATA_DIR.mkdir(exist_ok=True)
-    ARCHIVE.write_text(json.dumps(items[-1000:], ensure_ascii=False, indent=2),
-                       encoding="utf-8")
 
-def source_seed():
-    try:
-        return yaml.safe_load(SOURCES.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {}
+def extract_json(text):
+    text = text.strip()
+    for candidate in (
+        text,
+        re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip(),
+    ):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
 
-def clean_url(url):
+    for start, ch in enumerate(text):
+        if ch not in "[{":
+            continue
+        opener, closer = ch, ("]" if ch == "[" else "}")
+        depth = 0
+        in_string = False
+        escaped = False
+        for i in range(start, len(text)):
+            c = text[i]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif c == "\\":
+                    escaped = True
+                elif c == '"':
+                    in_string = False
+            else:
+                if c == '"':
+                    in_string = True
+                elif c == opener:
+                    depth += 1
+                elif c == closer:
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(text[start:i + 1])
+                        except json.JSONDecodeError:
+                            break
+    raise ValueError("Could not extract valid JSON from model response.")
+
+
+def normalize_items(payload):
+    items = payload.get("items") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        raise ValueError("JSON must contain an 'items' list.")
+    return items
+
+
+def valid_url(url):
     if not isinstance(url, str):
-        return ""
-    return url.strip()
+        return False
+    p = urlparse(url.strip())
+    return p.scheme in {"http", "https"} and bool(p.netloc)
 
-def call_openai(prompt):
-    key = os.environ.get("OPENAI_API_KEY")
-    if not key:
+
+def parse_date(value):
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    for candidate in (value, value.replace("Z", "+00:00")):
+        try:
+            dt = datetime.fromisoformat(candidate)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except ValueError:
+            pass
+    try:
+        return datetime.strptime(value[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
         return None
 
-    payload = {
-        "model": os.environ.get("OPENAI_MODEL", "gpt-5.6"),
-        "tools": [{"type": "web_search_preview"}],
-        "input": [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": prompt},
-        ],
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "weekly_feed",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "items": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "feed": {"type": "string",
-                                             "enum": list(FEEDS.keys())},
-                                    "title": {"type": "string"},
-                                    "url": {"type": "string"},
-                                    "date": {"type": "string"},
-                                    "outlet": {"type": "string"},
-                                    "language": {"type": "string",
-                                                 "enum": ["en", "de", "fr"]},
-                                    "source_type": {"type": "string"},
-                                    "scientific": {"type": "boolean"},
-                                    "switzerland": {"type": "boolean"},
-                                    "summary": {"type": "string"},
-                                    "why_relevant": {"type": "string"},
-                                    "older_but_relevant": {"type": "boolean"}
-                                },
-                                "required": ["feed","title","url","date","outlet",
-                                             "language","source_type","scientific",
-                                             "switzerland","summary","why_relevant",
-                                             "older_but_relevant"],
-                                "additionalProperties": False
-                            }
-                        }
-                    },
-                    "required": ["items"],
-                    "additionalProperties": False
-                }
-            }
-        }
+
+def clean_item(raw):
+    required = [
+        "feed", "title", "url", "date", "outlet", "language",
+        "source_type", "scientific", "switzerland", "summary", "why_relevant"
+    ]
+    if not isinstance(raw, dict) or any(k not in raw for k in required):
+        return None
+
+    feed = str(raw["feed"]).strip().lower()
+    if feed not in {"climate", "agriculture"}:
+        return None
+
+    title = str(raw["title"]).strip()
+    url = str(raw["url"]).strip()
+    outlet = str(raw["outlet"]).strip()
+    language = str(raw["language"]).strip().lower()
+    summary = str(raw["summary"]).strip()
+    why = str(raw["why_relevant"]).strip()
+    date = parse_date(raw["date"])
+
+    if not title or not valid_url(url) or not outlet or not summary or not why or date is None:
+        return None
+    if language not in {"en", "de", "fr"}:
+        return None
+
+    return {
+        "feed": feed,
+        "title": title,
+        "url": url,
+        "date": date.isoformat(),
+        "outlet": outlet,
+        "language": language,
+        "source_type": str(raw["source_type"]).strip(),
+        "scientific": bool(raw["scientific"]),
+        "switzerland": bool(raw["switzerland"]),
+        "summary": summary,
+        "why_relevant": why,
+        "older_but_relevant": bool(raw.get("older_but_relevant", False)),
     }
-    r = requests.post(
-        "https://api.openai.com/v1/responses",
-        headers={"Authorization": f"Bearer {key}",
-                 "Content-Type": "application/json"},
-        json=payload, timeout=180
-    )
-    r.raise_for_status()
-    data = r.json()
-    # Responses API text extraction
-    text = data.get("output_text")
-    if not text:
-        chunks = []
-        for out in data.get("output", []):
-            for c in out.get("content", []):
-                if c.get("type") == "output_text":
-                    chunks.append(c.get("text", ""))
-        text = "".join(chunks)
-    return json.loads(text)
 
-def build_prompt(archive, seeds):
-    recent = archive[-300:]
-    used = "\n".join(f"- {x.get('url','')}" for x in recent if x.get("url"))
-    seed_lines = []
-    for group, vals in seeds.items():
-        for x in vals or []:
-            seed_lines.append(f"{group}: {x.get('name')} — {x.get('url')}")
-    return f"""Today is {TODAY}. Research the web for this week's edition.
 
-Return 60 items total: 30 climate/ecology and 30 agriculture/food, distributed
-across the four feed categories. Do not interpret 1-30 as a quality ranking.
-Aim for >= 50% scientific/scholarly items overall and roughly 1/3 with substantive
-Switzerland connection. If there are not enough genuinely strong items, return fewer
-rather than padding.
-
-The four feed meanings:
-- climate: climate change, ecological crisis, biodiversity, energy/ecological
-  transition, adaptation, mitigation, planetary boundaries.
-- agriculture: farming, agrarian change, land, food production, food systems,
-  nutrition/environment interfaces, fisheries/aquaculture where relevant.
-- switzerland: any of the above with substantive Switzerland/Swiss/Alpine connection.
-- crossovers: especially strong interdisciplinary or unexpected links.
-
-Use English, German and French. Seek recent work but allow older items if newly
-relevant. For every item give the original publication URL, not a search-results URL.
-
-Seed sources to inspect:
-{chr(10).join(seed_lines)}
-
-Already-used URLs (avoid unless newly relevant and explain why):
-{used}
-"""
-
-def validate(items):
-    seen = set()
-    out = []
-    for x in items:
-        url = clean_url(x.get("url"))
-        title = (x.get("title") or "").strip()
-        if not url or not title:
+def validate_and_dedupe(items):
+    result, seen = [], set()
+    for raw in items:
+        item = clean_item(raw)
+        if item is None:
             continue
-        key = re.sub(r"[^a-z0-9]+", "", url.lower())
+        key = item["url"].rstrip("/").lower()
         if key in seen:
             continue
         seen.add(key)
-        x["url"] = url
-        out.append(x)
-    return out
+        result.append(item)
+    return result
 
-def rss_item(x):
-    pub = x.get("date") or TODAY
-    try:
-        d = dt.datetime.fromisoformat(pub.replace("Z", "+00:00"))
-    except Exception:
-        d = dt.datetime.now(dt.timezone.utc)
-    if d.tzinfo is None:
-        d = d.replace(tzinfo=dt.timezone.utc)
-    rfc = d.strftime("%a, %d %b %Y %H:%M:%S +0000")
-    desc = (
-        f"<p>{escape(x.get('summary',''))}</p>"
-        f"<p><strong>Warum relevant:</strong> {escape(x.get('why_relevant',''))}</p>"
-        f"<p><strong>Quelle:</strong> {escape(x.get('outlet',''))} · "
-        f"{escape(x.get('source_type',''))} · "
-        f"{escape(x.get('language',''))}"
-        f"{' · Schweiz-Bezug' if x.get('switzerland') else ''}</p>"
+
+def validate_collection(items):
+    if len(items) != EXPECTED_TOTAL:
+        fail(f"Expected exactly 60 valid items, got {len(items)}.")
+
+    climate = sum(x["feed"] == "climate" for x in items)
+    agriculture = sum(x["feed"] == "agriculture" for x in items)
+    scientific = sum(x["scientific"] for x in items)
+    swiss = sum(x["switzerland"] for x in items)
+
+    if climate != 30:
+        fail(f"Expected 30 climate items, got {climate}.")
+    if agriculture != 30:
+        fail(f"Expected 30 agriculture items, got {agriculture}.")
+    if scientific < 30:
+        fail(f"Scientific share too low: {scientific}/60.")
+    if swiss < 18:
+        fail(f"Switzerland share too low: {swiss}/60.")
+
+    return climate, agriculture, scientific, swiss
+
+
+def build_prompt(sources):
+    source_text = yaml.safe_dump(sources, allow_unicode=True, sort_keys=False)
+    return f"""
+You are the weekly research curator for a high-quality RSS research feed.
+
+Return EXACTLY 60 distinct items as JSON:
+{{
+  "items": [
+    {{
+      "feed": "climate|agriculture",
+      "title": "...",
+      "url": "https://...",
+      "date": "YYYY-MM-DD",
+      "outlet": "...",
+      "language": "en|de|fr",
+      "source_type": "journal|preprint|report|investigation|analysis|other",
+      "scientific": true,
+      "switzerland": false,
+      "summary": "2-3 factual sentences",
+      "why_relevant": "1-2 sentences explaining the surprising/critical relevance",
+      "older_but_relevant": false
+    }}
+  ]
+}}
+
+STRICT DISTRIBUTION:
+- exactly 30 climate items
+- exactly 30 agriculture/food items
+- at least 30/60 genuinely scientific/scholarly
+- at least 18/60 substantively Switzerland-related
+- Include English, German and French material where useful.
+- About half or more should be science, including critical social sciences:
+  human geography, political ecology, agrarian studies, rural sociology,
+  social anthropology, environmental history and political economy.
+- Explicitly search beyond Nature/Science, including Political Geography,
+  Antipode, Environment and Planning A/E, Geoforum, Global Environmental Change,
+  Journal of Peasant Studies, Journal of Agrarian Change, Agriculture and Human
+  Values, Food Policy, Sociologia Ruralis and Third World Quarterly.
+- Also search specialist journalism, NGOs, intergovernmental reports and Swiss
+  research institutions.
+- Do not rank items and do not favor large outlets.
+- Prefer original research, systematic reviews, substantial reports and
+  investigative/analytical journalism over routine news.
+- "Critical" does not automatically mean anti-government or anti-capitalist.
+  Include evidence challenging popular assumptions in any direction.
+- Older publications are allowed if newly relevant; mark them true.
+- URLs must be direct URLs to the actual publication/report/article.
+- Dates must be actual publication dates.
+- Never invent publications, URLs, dates, titles or outlets.
+- Search the web extensively before returning the JSON.
+- Return JSON only.
+
+Seed sources (not a restriction):
+{source_text}
+"""
+
+
+def research():
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        fail("OPENAI_API_KEY is not set.")
+
+    client = OpenAI(api_key=api_key)
+    response = client.responses.create(
+        model=MODEL,
+        tools=[{"type": "web_search_preview"}],
+        input=build_prompt(load_sources()),
     )
-    guid = escape(x["url"])
-    return f"""<item>
-<title>{escape(x['title'])}</title>
-<link>{guid}</link>
-<guid isPermaLink="true">{guid}</guid>
-<pubDate>{rfc}</pubDate>
-<description><![CDATA[{desc}]]></description>
-</item>"""
+
+    text = getattr(response, "output_text", None)
+    if not text:
+        fail("OpenAI response contained no output_text.")
+
+    try:
+        payload = extract_json(text)
+        items = validate_and_dedupe(normalize_items(payload))
+    except Exception as exc:
+        print("Raw model response for debugging:")
+        print(text[:12000])
+        fail(f"Could not parse/validate model JSON: {exc}")
+
+    stats = validate_collection(items)
+    print(
+        f"Validated 60 items: climate={stats[0]}, agriculture={stats[1]}, "
+        f"scientific={stats[2]}/60, Switzerland={stats[3]}/60"
+    )
+    return items
+
+
+def save_archive(items):
+    archive = []
+    if ARCHIVE_FILE.exists():
+        try:
+            archive = json.loads(ARCHIVE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            archive = []
+
+    known = {x.get("url", "").rstrip("/").lower() for x in archive}
+    for item in items:
+        if item["url"].rstrip("/").lower() not in known:
+            archive.append(item)
+
+    ARCHIVE_FILE.write_text(
+        json.dumps(archive, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def rss_item(item):
+    pubdate = format_datetime(parse_date(item["date"]))
+    description = (
+        f"<p>{escape(item['summary'])}</p>"
+        f"<p><strong>Why relevant:</strong> {escape(item['why_relevant'])}</p>"
+        f"<p><strong>Source:</strong> {escape(item['outlet'])} "
+        f"({escape(item['source_type'])}, {escape(item['language'])})</p>"
+    )
+    return (
+        "<item>\n"
+        f"<title>{escape(item['title'])}</title>\n"
+        f"<link>{escape(item['url'])}</link>\n"
+        f"<guid isPermaLink=\"true\">{escape(item['url'])}</guid>\n"
+        f"<pubDate>{pubdate}</pubDate>\n"
+        f"<description><![CDATA[{description}]]></description>\n"
+        "</item>"
+    )
+
 
 def write_feed(slug, title, items):
-    FEED_DIR.mkdir(exist_ok=True)
-    pages_base_url = os.environ.get(
-    "PAGES_BASE_URL",
-    "https://example.invalid"
-).rstrip("/")
+    base = os.environ.get("PAGES_BASE_URL", "").rstrip("/")
+    if not base:
+        fail("PAGES_BASE_URL is not set.")
+    if not items:
+        fail(f"Refusing to write empty feed: {slug}")
 
-channel_link = f"{pages_base_url}/feeds/{slug}.xml"<link>{channel_link}</link>
-<atom:link href="{channel_link}" rel="self" type="application/rss+xml"/>
-    body = "\n".join(rss_item(x) for x in items)
-    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0"
-     xmlns:atom="http://www.w3.org/2005/Atom">
-<channel>
-<title>{escape(title)} — Climate & Food Critical Feed</title>
-<link>{channel_link}</link>
-<description>Weekly curated research and analysis in English, German and French.</description>
-<language>en</language>
-<lastBuildDate>{dt.datetime.now(dt.timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")}</lastBuildDate>
-{body}
-</channel>
-</rss>
-"""
-    (FEED_DIR / f"{slug}.xml").write_text(xml, encoding="utf-8")
+    channel_link = f"{base}/feeds/{slug}.xml"
+    xml_items = "\n".join(
+        rss_item(x) for x in sorted(items, key=lambda x: x["date"], reverse=True)
+    )
+    now = format_datetime(datetime.now(timezone.utc))
+
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">\n'
+        "<channel>\n"
+        f"<title>{escape(title)}</title>\n"
+        f"<link>{escape(channel_link)}</link>\n"
+        f'<atom:link href="{escape(channel_link)}" rel="self" type="application/rss+xml"/>\n'
+        "<description>Weekly curated research and analysis in English, German and French.</description>\n"
+        "<language>en</language>\n"
+        f"<lastBuildDate>{now}</lastBuildDate>\n"
+        f"{xml_items}\n"
+        "</channel>\n"
+        "</rss>\n"
+    )
+
+    path = FEEDS_DIR / f"{slug}.xml"
+    path.write_text(xml, encoding="utf-8")
+    print(f"Wrote {path} ({len(items)} items)")
+
 
 def main():
-    seeds = source_seed()
-    archive = load_archive()
-    prompt = build_prompt(archive, seeds)
-    result = call_openai(prompt)
+    FEEDS_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    if result is None:
-        print("OPENAI_API_KEY not set: writing valid placeholder feeds for dry-run.")
-        for slug, title in FEEDS.items():
-            write_feed(slug, title, [])
-        return
+    items = research()
 
-    items = validate(result.get("items", []))
+    climate = [x for x in items if x["feed"] == "climate"]
+    agriculture = [x for x in items if x["feed"] == "agriculture"]
+    switzerland = [x for x in items if x["switzerland"]]
 
-    # Safety checks: keep only known feed labels and required fields.
-    items = [x for x in items if x.get("feed") in FEEDS]
+    crossovers = [
+        x for x in items
+        if "food" in (x["title"] + " " + x["summary"]).lower()
+        and any(
+            term in (x["title"] + " " + x["summary"]).lower()
+            for term in [
+                "climate", "carbon", "emission", "warming",
+                "biodiversity", "ecology", "drought", "heat"
+            ]
+        )
+    ]
 
-    # Avoid an accidental one-source monoculture.
-    counts = {}
-    for x in items:
-        counts[x["source_type"]] = counts.get(x["source_type"], 0) + 1
+    if len(switzerland) < 6:
+        fail("Too few Switzerland-linked items for the Switzerland feed.")
+    if not crossovers:
+        fail("No climate/food crossover items identified.")
 
-    # Archive only selected items.
-    archive.extend(items)
-    save_archive(archive)
+    write_feed("climate", "Climate & Ecology — Critical Research Feed", climate)
+    write_feed("agriculture", "Agriculture & Food Systems — Critical Research Feed", agriculture)
+    write_feed("switzerland", "Switzerland — Climate, Ecology, Agriculture & Food", switzerland)
+    write_feed("crossovers", "Crossovers & Wild Cards — Climate, Ecology, Agriculture & Food", crossovers)
 
-    for slug, title in FEEDS.items():
-        subset = [x for x in items if x.get("feed") == slug]
-        # Keep a manageable weekly issue. No ranking is implied.
-        write_feed(slug, title, subset[:40])
+    save_archive(items)
+    print("Feed generation completed successfully.")
 
-    stats = {
-        "date": TODAY,
-        "items": len(items),
-        "scientific": sum(bool(x.get("scientific")) for x in items),
-        "switzerland": sum(bool(x.get("switzerland")) for x in items),
-        "source_types": counts,
-    }
-    (DATA_DIR / "last_run.json").write_text(
-        json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    print(json.dumps(stats, ensure_ascii=False, indent=2))
 
 if __name__ == "__main__":
     main()
